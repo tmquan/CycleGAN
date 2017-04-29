@@ -16,7 +16,9 @@ import tensorflow as tf
 import tensorflow.contrib.slim as slim
 from tensorflow.python.framework import ops
 
+from tensorpack import (FeedfreeTrainerBase, QueueInput, ModelDesc, DataFlow)
 from tensorpack import *
+
 from tensorpack.utils.viz import *
 from tensorpack.tfutils.summary import add_moving_summary
 from tensorpack.tfutils.scope_utils import auto_reuse_variable_scope
@@ -25,12 +27,12 @@ import tensorpack.tfutils.symbolic_functions as symbolic_functions
 
 # Global variables
 BATCH_SIZE = 1
-# EPOCH_SIZE = 30
+EPOCH_SIZE = 30
 CHANNEL = 1
 LAMBDA = 1e+2
-BETA   = 1e-2
+BETA   = 1e+2
 NF	   = 64 # number of filter in generator F and G
-SHAPE  = 1024
+SHAPE  = 512
 
 # Declare operators from https://github.com/XHUJOY/CycleGAN-tensorflow/blob/master/ops.py
 def batch_norm(x, name="batch_norm"):
@@ -64,14 +66,9 @@ def linear(input_, output_size, scope=None, stddev=0.02, bias_start=0.0, with_w=
 
 # 
 # https://github.com/XHUJOY/CycleGAN-tensorflow/blob/master/module.py
-def discriminator(image, options, reuse=False, name="discriminator"):
+def discriminator(image, name="discriminator"):
 	with tf.variable_scope(name):
 		# image is 256 x 256 x input_c_dim
-		if reuse:
-			tf.get_variable_scope().reuse_variables()
-		else:
-			assert tf.get_variable_scope().reuse == False
-
 		h0 = lrelu(conv2d(image, NF, name='d_h0_conv'))
 		# h0 is (128 x 128 x self.df_dim)
 		h1 = lrelu(batch_norm(conv2d(h0, NF*2, name='d_h1_conv'), 'd_bn1'))
@@ -84,13 +81,9 @@ def discriminator(image, options, reuse=False, name="discriminator"):
 		# h4 is (32 x 32 x 1)
 		return h4
 
-def generator_unet(image, reuse=False, name="generator"):
+def generator_unet(image, name="generator"):
 	with tf.variable_scope(name):
 		# image is 256 x 256 x input_c_dim
-		if reuse:
-			tf.get_variable_scope().reuse_variables()
-		else:
-			assert tf.get_variable_scope().reuse == False
 
 		# image is (256 x 256 x input_c_dim)
 		e1 = conv2d(image, NF, name='g_e1_conv')
@@ -143,15 +136,11 @@ def generator_unet(image, reuse=False, name="generator"):
 
 		return tf.nn.tanh(d8)
 
-def generator_resnet(image, reuse=False, name="generator"):
+def generator_resnet(image, name="generator"):
 	with tf.variable_scope(name):
 		# image is 256 x 256 x input_c_dim
-		if reuse:
-			tf.get_variable_scope().reuse_variables()
-		else:
-			assert tf.get_variable_scope().reuse == False
 
-		def residule_block(x, dim, ks=3, s=1, name='res'):
+		def residual_block(x, dim, ks=3, s=1, name='res'):
 			p = int((ks - 1) / 2)
 			y = tf.pad(x, [[0, 0], [p, p], [p, p], [0, 0]], "REFLECT")
 			y = batch_norm(conv2d(y, dim, ks, s, padding='VALID', name=name+'_c1'), name+'_bn1')
@@ -168,15 +157,15 @@ def generator_resnet(image, reuse=False, name="generator"):
 		c2 = tf.nn.relu(batch_norm(conv2d(c1, NF*2, 3, 2, name='g_e2_c'), 'g_e2_bn'))
 		c3 = tf.nn.relu(batch_norm(conv2d(c2, NF*4, 3, 2, name='g_e3_c'), 'g_e3_bn'))
 		# define G network with 9 resnet blocks
-		r1 = residule_block(c3, NF*4, name='g_r1')
-		r2 = residule_block(r1, NF*4, name='g_r2')
-		r3 = residule_block(r2, NF*4, name='g_r3')
-		r4 = residule_block(r3, NF*4, name='g_r4')
-		r5 = residule_block(r4, NF*4, name='g_r5')
-		r6 = residule_block(r5, NF*4, name='g_r6')
-		r7 = residule_block(r6, NF*4, name='g_r7')
-		r8 = residule_block(r7, NF*4, name='g_r8')
-		r9 = residule_block(r8, NF*4, name='g_r9')
+		r1 = residual_block(c3, NF*4, name='g_r1')
+		r2 = residual_block(r1, NF*4, name='g_r2')
+		r3 = residual_block(r2, NF*4, name='g_r3')
+		r4 = residual_block(r3, NF*4, name='g_r4')
+		r5 = residual_block(r4, NF*4, name='g_r5')
+		r6 = residual_block(r5, NF*4, name='g_r6')
+		r7 = residual_block(r6, NF*4, name='g_r7')
+		r8 = residual_block(r7, NF*4, name='g_r8')
+		r9 = residual_block(r8, NF*4, name='g_r9')
 
 		d1 = deconv2d(r9, NF*2, 3, 2, name='g_d1_dc')
 		d1 = tf.nn.relu(batch_norm(d1, 'g_d1_bn'))
@@ -187,9 +176,15 @@ def generator_resnet(image, reuse=False, name="generator"):
 		pred = tf.nn.tanh(batch_norm(pred, 'g_pred_bn'))
 
 		return pred
-# Declare models
 
+
+# Declare models
 class CycleGANModel(ModelDesc):
+
+	def _get_inputs(self):
+		return [InputDesc(tf.float32, [None, SHAPE, SHAPE, CHANNEL], 'image'),
+				InputDesc(tf.float32, [None, SHAPE, SHAPE, CHANNEL], 'label')] # if 1 AtoB, if 0 BtoA
+		# pass	
 	def collect_variables(self, gG_scope='gG', dX_scope='dX',
 								gF_scope='gF', dY_scope='dY'):
 		self.gG_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, gG_scope)
@@ -197,24 +192,26 @@ class CycleGANModel(ModelDesc):
 		self.dX_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, dX_scope)
 		self.dY_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, dY_scope)
 
-
+	# @auto_reuse_variable_scope
 	def generator_G(self, imgs):
-		pass
+		return generator_unet(imgs, name='gG')
+		# pass
+
+	# @auto_reuse_variable_scope
 	def generator_F(self, imgs):
-		pass
+		return generator_unet(imgs, name='gF')
+		# pass
 
-	@auto_reuse_variable_scope
-	def discriminator_X(self, inputs, outputs):
-		pass
+	# @auto_reuse_variable_scope
+	def discriminator_X(self, imgs):
+		return discriminator(imgs, name='dX')
+		# pass
 
-	@auto_reuse_variable_scope
-	def discriminator_Y(self, inputs, outputs):
-		pass
+	# @auto_reuse_variable_scope
+	def discriminator_Y(self, imgs):
+		return discriminator(imgs, name='dY')
+		# pass
 
-	def _get_input(self):
-		return [InputDesc(tf.float32, [None, SHAPE, SHAPE, CHANNEL], 'image'),
-				InputDesc(tf.float32, [None, SHAPE, SHAPE, CHANNEL], 'label')] # if 1 AtoB, if 0 BtoA
-		# pass	
 	def _get_optimizer(self):
 		lr = symbolic_functions.get_scalar_var('learning_rate', 2e-4, summary=True)
 		return tf.train.AdamOptimizer(lr, beta1=0.5, epsilon=1e-3)
@@ -223,8 +220,8 @@ class CycleGANModel(ModelDesc):
 
 	def _build_graph(self, inputs):
 		image, label = inputs
-		image = image / 128.0 - 1.0
-		label = label / 128.0 - 1.0
+		image = (image / 255.0 - 0.5)*2.0
+		label = (label / 255.0 - 0.5)*2.0
 		
 		X = image
 		Y = label
@@ -232,95 +229,116 @@ class CycleGANModel(ModelDesc):
 
 		###############################################################################################
 		#with tf.variable_scope('AtoB'):
-		Y_ = self.generator_G(X)
 		
-		# Adversarial loss
-		with tf.name_scope('dY'):
-			pred_real_Y = self.discriminator_Y(Y)
-			pred_fake_Y = self.discriminator_Y(Y_)
-
-			score_real_Y = tf.sigmoid(pred_real_Y)
-			score_fake_Y = tf.sigmoid(pred_fake_Y)
-
-			tf.summary.histogram('score_real_Y', score_real_Y)
-			tf.summary.histogram('score_fake_Y', score_fake_Y)
-			d_loss_pos_Y = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
-					logits=pred_real_Y, 
-					labels=tf.ones_like(pred_real_Y)), name='loss_real_Y')
-			d_loss_neg_Y = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
-					logits=pred_fake_Y, 
-					labels=tf.zeros_like(pred_fake_Y)), name='loss_fake_Y')
-
-			d_pos_acc_Y = tf.reduce_mean(tf.cast(score_real_Y > 0.5, tf.float32), name='accuracy_real_Y')
-			d_neg_acc_Y = tf.reduce_mean(tf.cast(score_fake_Y < 0.5, tf.float32), name='accuracy_fake_Y')
-			
-			
-
-			self.dY_loss  = tf.add(.5 * d_loss_pos_Y, .5 * d_loss_neg_Y, name='dY_loss')
-			dY_accuracy   = tf.add(.5 * d_pos_acc_Y,  .5 * d_neg_acc_Y,  name='dY_accuracy')
-		with tf.name_scope('gG'):
-			self.gG_loss  = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
-					logits=pred_fake_Y, labels=tf.ones_like(pred_fake_Y)), name='gG_loss')
-			gG_accuracy = tf.reduce_mean(tf.cast(score_fake_Y > 0.5, tf.float32), name='gG_accuracy')
-					
 		
-		with tf.name_scope('gF'):
-			# Consistency loss
-			X__ = self.generator_F(Y_)
-			self.cX_loss   = tf.reduce_mean(tf.abs(X__ - X), name='cX_loss')
-			self.gG_loss   = self.gG_loss + LAMBDA*self.cX_loss  # Add the l1 loss
+		with tf.name_scope('genAtoB'):
+			with tf.name_scope('gG'):
+				Y_ = self.generator_G(X)
+			with tf.name_scope('gF'):			
+				X__ = self.generator_F(Y_)
+			with tf.name_scope('dY'):
+				pred_real_Y = self.discriminator_Y(Y)
+				pred_fake_Y = self.discriminator_Y(Y_)
+		with tf.name_scope('genBtoA'):
+			with tf.name_scope('gF'):
+				X_ = self.generator_F(Y)	
+			with tf.name_scope('gG'):			
+				Y__ = self.generator_G(X_)
+			with tf.name_scope('dX'):
+				pred_real_X = self.discriminator_X(X)
+				pred_fake_X = self.discriminator_X(X_)
+
+		with tf.name_scope("GAN_loss"):
+			###############################################################################################
+			with tf.name_scope('discriminator'):
+				score_real_Y = tf.sigmoid(pred_real_Y)
+				score_fake_Y = tf.sigmoid(pred_fake_Y)
+
+				tf.summary.histogram('score_real_Y', score_real_Y)
+				tf.summary.histogram('score_fake_Y', score_fake_Y)
+				d_loss_pos_Y = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
+						logits=pred_real_Y, 
+						labels=tf.ones_like(pred_real_Y)), name='loss_real_Y')
+				d_loss_neg_Y = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
+						logits=pred_fake_Y, 
+						labels=tf.zeros_like(pred_fake_Y)), name='loss_fake_Y')
+
+				d_pos_acc_Y = tf.reduce_mean(tf.cast(score_real_Y > 0.5, tf.float32), name='accuracy_real_Y')
+				d_neg_acc_Y = tf.reduce_mean(tf.cast(score_fake_Y < 0.5, tf.float32), name='accuracy_fake_Y')
+				
+				
+
+				self.dY_loss  = tf.add(.5 * d_loss_pos_Y, .5 * d_loss_neg_Y, name='dY_loss')
+				dY_accuracy   = tf.add(.5 * d_pos_acc_Y,  .5 * d_neg_acc_Y,  name='dY_accuracy')
+
+				###############################################################################################
+				score_real_X = tf.sigmoid(pred_real_X)
+				score_fake_X = tf.sigmoid(pred_fake_X)
+
+				tf.summary.histogram('score_real_X', score_real_X)
+				tf.summary.histogram('score_fake_X', score_fake_X)
+				d_loss_pos_X = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
+						logits=pred_real_X, 
+						labels=tf.ones_like(pred_real_X)), name='loss_real_X')
+				d_loss_neg_X = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
+						logits=pred_fake_X, 
+						labels=tf.zeros_like(pred_fake_X)), name='loss_fake_X')
+
+				d_pos_acc_X = tf.reduce_mean(tf.cast(score_real_X > 0.5, tf.float32), name='accuracy_real_X')
+				d_neg_acc_X = tf.reduce_mean(tf.cast(score_fake_X < 0.5, tf.float32), name='accuracy_fake_X')
+				
+				
+
+				self.dX_loss  = tf.add(.5 * d_loss_pos_X, .5 * d_loss_neg_X, name='dX_loss')
+				dX_accuracy   = tf.add(.5 * d_pos_acc_X,  .5 * d_neg_acc_X,  name='dX_accuracy')
+		
+			
+			###############################################################################################
+			with tf.name_scope('generator'):
+				self.gG_loss  = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
+						logits=pred_fake_Y, labels=tf.ones_like(pred_fake_Y)), name='gG_loss')
+				gG_accuracy = tf.reduce_mean(tf.cast(score_fake_Y > 0.5, tf.float32), name='gG_accuracy')
+						
+				# Consistency loss
+				self.cX_loss   = tf.reduce_mean(tf.abs(X__ - X), name='cX_loss')
+				self.gG_loss   = tf.add(self.gG_loss, LAMBDA*self.cX_loss, name='gG_total')  # Add the l1 loss
+				###############################################################################################
+				self.gF_loss  = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
+						logits=pred_fake_X, labels=tf.ones_like(pred_fake_X)), name='gF_loss')
+				gF_accuracy = tf.reduce_mean(tf.cast(score_fake_X > 0.5, tf.float32), name='gF_accuracy')
+						
+			
+				self.cY_loss   = tf.reduce_mean(tf.abs(Y__ - Y), name='cY_loss')
+				self.gF_loss   = tf.add(self.gF_loss, LAMBDA*self.cY_loss, name='gF_total')  # Add the l1 loss
+		###############################################################################################
 
 		###############################################################################################
-		#with tf.variable_scope('BtoA'):
-		X_ = self.generator_G(Y)
-		
-		# Adversarial loss
-		with tf.name_scope('dX'):
-			pred_real_X = self.discriminator_X(X)
-			pred_fake_X = self.discriminator_X(X_)
-
-			score_real_X = tf.sigmoid(pred_real_X)
-			score_fake_X = tf.sigmoid(pred_fake_X)
-
-			tf.summary.histogram('score_real_X', score_real_X)
-			tf.summary.histogram('score_fake_X', score_fake_X)
-			d_loss_pos_X = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
-					logits=pred_real_X, 
-					labels=tf.ones_like(pred_real_X)), name='loss_real_X')
-			d_loss_neg_X = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
-					logits=pred_fake_X, 
-					labels=tf.zeros_like(pred_fake_X)), name='loss_fake_X')
-
-			d_pos_acc_X = tf.reduce_mean(tf.cast(score_real_X > 0.5, tf.float32), name='accuracy_real_X')
-			d_neg_acc_X = tf.reduce_mean(tf.cast(score_fake_X < 0.5, tf.float32), name='accuracy_fake_X')
-			
-			
-
-			self.dX_loss  = tf.add(.5 * d_loss_pos_X, .5 * d_loss_neg_X, name='dX_loss')
-			dX_accuracy   = tf.add(.5 * d_pos_acc_X,  .5 * d_neg_acc_X,  name='dX_accuracy')
-		with tf.name_scope('gF'):
-			self.gF_loss  = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
-					logits=pred_fake_X, labels=tf.ones_like(pred_fake_X)), name='gF_loss')
-			gF_accuracy = tf.reduce_mean(tf.cast(score_fake_X > 0.5, tf.float32), name='gF_accuracy')
-					
-		
-		with tf.name_scope('gG'):
-			# Consistency loss
-			Y__ = self.generator_F(X_)
-			self.cY_loss   = tf.reduce_mean(tf.abs(Y__ - Y), name='cY_loss')
-			self.gF_loss   = self.gF_loss + LAMBDA*self.cY_loss  # Add the l1 loss
-		# pass
-
 		# tensorboard visualization            
-		viz_total = (tf.concat([input, label, X_, Y_, X__, Y__], 2) + 1.0) * 128.0
-		viz_total = tf.cast(tf.clip_by_value(viz_total, 0, 255), tf.uint8, name='viz_total') 
+		#viz_total = (tf.concat([image,Y_,X__,label,X_,Y__], 2) + 1.0) * 128.0
+		#viz_total = tf.cast(tf.clip_by_value(viz_total, 0, 255), tf.uint8, name='viz_total') 
 		# Take one slice
-		tf.summary.image('input, label, X_, Y_, X__, Y__', viz[:,:,:,0:1], max_outputs=2)
+		#tf.summary.image('image,Yh,Xhh,label,Xh,Yhh', viz_total[:,:,:,0:1], max_outputs=2)
+		viz_cycleG = tf.concat([image,Y_,X__], 2, name='viz_cycleG')
+		viz_cycleF = tf.concat([label,X_,Y__], 2, name='viz_cycleF')
+		viz_concat = tf.concat([viz_cycleG, viz_cycleF], 1, name='viz_concat')
+		tf.summary.image('concatenation', viz_concat[:,:,:,0:1], max_outputs=30)
 
-		viz_genG = tf.cast(tf.clip_by_value(Y_, 0, 255), tf.uint8, name='viz_genG') 
-		tf.summary.image('genG', viz_genG[:,:,:,0:1], max_outputs=2)
+		viz_genG = (Y_ / 2.0 + 0.5) * 255.0
+		viz_genG = tf.cast(tf.clip_by_value(viz_genG, 0, 255), tf.uint8, name='viz_genG') 
+		tf.summary.image('genG', viz_genG[:,:,:,0:1], max_outputs=30)
+
+		viz_genF = (X_ / 2.0 + 0.5) * 255.0
+		viz_genF = tf.cast(tf.clip_by_value(viz_genF, 0, 255), tf.uint8, name='viz_genF') 
+		tf.summary.image('genF', viz_genF[:,:,:,0:1], max_outputs=30)
+
 
 		# Collect all the variable loss 
+		add_moving_summary(self.gG_loss, self.dY_loss, 
+						   self.gF_loss, self.dX_loss, 
+						   gG_accuracy, dY_accuracy, 
+						   gF_accuracy, dX_accuracy, 
+						   self.cX_loss, self.cY_loss,
+						   )
 		self.collect_variables()
 		
 		
@@ -339,15 +357,21 @@ class CycleGANTrainer(FeedfreeTrainerBase):
 		self.gG_min = opt.minimize(self.model.gG_loss, var_list=self.model.gG_vars, name='gG_op')
 		with tf.control_dependencies([self.gG_min]):
 			self.dY_min = opt.minimize(self.model.dY_loss, var_list=self.model.dY_vars, name='dY_op')
+			# self.dY_min = opt.minimize(-self.model.dY_loss, var_list=self.model.dY_vars, name='dY_op') # maxD = -minD
 		self.trainY_op = self.dY_min
 
 		self.gF_min = opt.minimize(self.model.gF_loss, var_list=self.model.gF_vars, name='gF_op')
 		with tf.control_dependencies([self.gF_min]):
 			self.dX_min = opt.minimize(self.model.dX_loss, var_list=self.model.dX_vars, name='dX_op')
+			# self.dX_min = opt.minimize(-self.model.dX_loss, var_list=self.model.dX_vars, name='dX_op') # maxD = -minD
 		self.trainX_op = self.dX_min
 
+		self.train_op = [self.trainX_op, self.trainY_op]
+		# self.train_op = [self.gG_min, self.dY_min, self.gF_min, self.dX_min]
+
+
 class ImagePairData(RNGDataFlow):
-	def __init__(self, imageDir, labelDir, dtype='float32'):
+	def __init__(self, imageDir, labelDir, size, dtype='float32'):
 		"""
 		Args:
 			shapes (list): a list of lists/tuples. Shapes of each component.
@@ -361,34 +385,42 @@ class ImagePairData(RNGDataFlow):
 		self.dtype  = dtype
 		self.imageDir = imageDir
 		self.labelDir = labelDir
-		self._size  = len(imageDir)
+		self._size  = size
+
 	def size(self):
 		return self._size
+
 	def reset_state(self):
 		self.rng = get_rng(self)   
 		pass
+
 	def get_data(self):
 		self.reset_state()
 		images = glob.glob(self.imageDir + '/*.png')
 		labels = glob.glob(self.labelDir + '/*.png')
 		# print images
 		# print labels
-		EPOCH_SIZE = len(images)
-		for k in range(EPOCH_SIZE):
+		# EPOCH_SIZE = len(images)
+		# EPOCH_SIZE = 30
+		for k in range(self._size):
 			from random import randrange
 			rand_index_image = randrange(0, len(images))
 			rand_index_label = randrange(0, len(labels))
 			image = skimage.io.imread(images[rand_index_image])
 			label = skimage.io.imread(labels[rand_index_label])
+			#TODO: augmentation here
+
 			image = np.expand_dims(image, axis=0)
 			label = np.expand_dims(label, axis=0)
+			image = np.expand_dims(image, axis=-1)
+			label = np.expand_dims(label, axis=-1)
 			yield [image.astype(np.uint8), label.astype(np.uint8)]
 
 def get_data():
-	ds_train = ImagePairData(args.imageDir, args.labelDir)
-	ds_valid = ImagePairData(args.imageDir, args.labelDir)
-	PrintData(ds_train, num=2)
-	PrintData(ds_valid, num=2)
+	ds_train = ImagePairData(args.imageDir, args.labelDir, 60)
+	ds_valid = ImagePairData(args.imageDir, args.labelDir, 60)
+	PrintData(ds_train, num=3)
+	PrintData(ds_valid, num=3)
 	return ds_train, ds_valid
 
 def get_config():
@@ -403,11 +435,10 @@ def get_config():
         callbacks=[
             PeriodicTrigger(ModelSaver(), every_k_epochs=100),
             ScheduledHyperParamSetter('learning_rate', [(200, 1e-4)]),
-            PeriodicTrigger(InferenceRunner(ds_valid, [ScalarStats('L1_loss'), ScalarStats('TV_loss')]), every_k_epochs=1),
-        ],
+            ],
         model=CycleGANModel(),
         steps_per_epoch=ds_train.size(),
-        max_epoch=10,
+        max_epoch=4000,
     )
 
 if __name__ == '__main__':
