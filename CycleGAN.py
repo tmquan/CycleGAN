@@ -172,7 +172,7 @@ def generator_resnet(image, name="generator"):
 		d2 = deconv2d(d1, NF, 3, 2, name='g_d2_dc')
 		d2 = tf.nn.relu(batch_norm(d2, 'g_d2_bn'))
 		d2 = tf.pad(d2, [[0, 0], [3, 3], [3, 3], [0, 0]], "REFLECT")
-		pred = conv2d(d2, options.output_c_dim, 7, 1, padding='VALID', name='g_pred_c')
+		pred = conv2d(d2, CHANNEL, 7, 1, padding='VALID', name='g_pred_c')
 		pred = tf.nn.tanh(batch_norm(pred, 'g_pred_bn'))
 
 		return pred
@@ -251,11 +251,10 @@ class CycleGANModel(ModelDesc):
 		with tf.name_scope("GAN_loss"):
 			###############################################################################################
 			with tf.name_scope('discriminator'):
-				score_real_Y = tf.sigmoid(pred_real_Y)
-				score_fake_Y = tf.sigmoid(pred_fake_Y)
-
-				tf.summary.histogram('score_real_Y', score_real_Y)
-				tf.summary.histogram('score_fake_Y', score_fake_Y)
+				
+				# d_loss_pos_Y = tf.reduce_mean(tf.square(tf.subtract(pred_real_Y, tf.ones_like(pred_real_Y))), name='loss_real_Y')
+				# d_loss_neg_Y = tf.reduce_mean(tf.square(           (pred_fake_Y                           )), name='loss_fake_Y')
+				
 				d_loss_pos_Y = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
 						logits=pred_real_Y, 
 						labels=tf.ones_like(pred_real_Y)), name='loss_real_Y')
@@ -263,53 +262,64 @@ class CycleGANModel(ModelDesc):
 						logits=pred_fake_Y, 
 						labels=tf.zeros_like(pred_fake_Y)), name='loss_fake_Y')
 
+				self.dY_loss  = tf.add(.5 * d_loss_pos_Y, .5 * d_loss_neg_Y, name='dY_loss')
+
+				score_real_Y = tf.sigmoid(pred_real_Y)
+				score_fake_Y = tf.sigmoid(pred_fake_Y)
+
+				tf.summary.histogram('score_real_Y', score_real_Y)
+				tf.summary.histogram('score_fake_Y', score_fake_Y)
+
 				d_pos_acc_Y = tf.reduce_mean(tf.cast(score_real_Y > 0.5, tf.float32), name='accuracy_real_Y')
 				d_neg_acc_Y = tf.reduce_mean(tf.cast(score_fake_Y < 0.5, tf.float32), name='accuracy_fake_Y')
 				
-				
-
-				self.dY_loss  = tf.add(.5 * d_loss_pos_Y, .5 * d_loss_neg_Y, name='dY_loss')
 				dY_accuracy   = tf.add(.5 * d_pos_acc_Y,  .5 * d_neg_acc_Y,  name='dY_accuracy')
 
 				###############################################################################################
-				score_real_X = tf.sigmoid(pred_real_X)
-				score_fake_X = tf.sigmoid(pred_fake_X)
-
-				tf.summary.histogram('score_real_X', score_real_X)
-				tf.summary.histogram('score_fake_X', score_fake_X)
+				# d_loss_pos_X = tf.reduce_mean(tf.square(tf.subtract(pred_real_X, tf.ones_like(pred_real_X))), name='loss_real_X')
+				# d_loss_neg_X = tf.reduce_mean(tf.square(           (pred_fake_X                           )), name='loss_fake_X')
+				
 				d_loss_pos_X = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
 						logits=pred_real_X, 
 						labels=tf.ones_like(pred_real_X)), name='loss_real_X')
 				d_loss_neg_X = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
 						logits=pred_fake_X, 
 						labels=tf.zeros_like(pred_fake_X)), name='loss_fake_X')
+				self.dX_loss  = tf.add(.5 * d_loss_pos_X, .5 * d_loss_neg_X, name='dX_loss')
+				
+				score_real_X = tf.sigmoid(pred_real_X)
+				score_fake_X = tf.sigmoid(pred_fake_X)
 
+				tf.summary.histogram('score_real_X', score_real_X)
+				tf.summary.histogram('score_fake_X', score_fake_X)
+				
 				d_pos_acc_X = tf.reduce_mean(tf.cast(score_real_X > 0.5, tf.float32), name='accuracy_real_X')
 				d_neg_acc_X = tf.reduce_mean(tf.cast(score_fake_X < 0.5, tf.float32), name='accuracy_fake_X')
 				
-				
-
-				self.dX_loss  = tf.add(.5 * d_loss_pos_X, .5 * d_loss_neg_X, name='dX_loss')
 				dX_accuracy   = tf.add(.5 * d_pos_acc_X,  .5 * d_neg_acc_X,  name='dX_accuracy')
 		
 			
 			###############################################################################################
 			with tf.name_scope('generator'):
-				self.gG_loss  = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
-						logits=pred_fake_Y, labels=tf.ones_like(pred_fake_Y)), name='gG_loss')
-				gG_accuracy = tf.reduce_mean(tf.cast(score_fake_Y > 0.5, tf.float32), name='gG_accuracy')
+				###############################################################################################
+				self.gG_loss   = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
+											   logits=pred_fake_Y, 
+											   labels=tf.ones_like(pred_fake_Y)), name='gG_loss')
 						
 				# Consistency loss
 				self.cX_loss   = tf.reduce_mean(tf.abs(X__ - X), name='cX_loss')
-				self.gG_loss   = tf.add(self.gG_loss, LAMBDA*self.cX_loss, name='gG_total')  # Add the l1 loss
+				gG_accuracy    = tf.reduce_mean(tf.cast(score_fake_Y > 0.5, tf.float32), name='gG_accuracy')
 				###############################################################################################
-				self.gF_loss  = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
-						logits=pred_fake_X, labels=tf.ones_like(pred_fake_X)), name='gF_loss')
-				gF_accuracy = tf.reduce_mean(tf.cast(score_fake_X > 0.5, tf.float32), name='gF_accuracy')
+				self.gF_loss   = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
+											   logits=pred_fake_X, 
+											   labels=tf.ones_like(pred_fake_X)), name='gF_loss')
 						
 			
 				self.cY_loss   = tf.reduce_mean(tf.abs(Y__ - Y), name='cY_loss')
-				self.gF_loss   = tf.add(self.gF_loss, LAMBDA*self.cY_loss, name='gF_total')  # Add the l1 loss
+				gF_accuracy    = tf.reduce_mean(tf.cast(score_fake_X > 0.5, tf.float32), name='gF_accuracy')
+				###############################################################################################
+				self.gG_loss   = tf.add(self.gG_loss, LAMBDA*self.cY_loss, name='gG_total')  # Add the l1 loss
+				self.gF_loss   = tf.add(self.gF_loss, LAMBDA*self.cX_loss, name='gF_total')  # Add the l1 loss
 		###############################################################################################
 
 		###############################################################################################
@@ -357,17 +367,14 @@ class CycleGANTrainer(FeedfreeTrainerBase):
 		self.gG_min = opt.minimize(self.model.gG_loss, var_list=self.model.gG_vars, name='gG_op')
 		with tf.control_dependencies([self.gG_min]):
 			self.dY_min = opt.minimize(self.model.dY_loss, var_list=self.model.dY_vars, name='dY_op')
-			# self.dY_min = opt.minimize(-self.model.dY_loss, var_list=self.model.dY_vars, name='dY_op') # maxD = -minD
-		self.trainY_op = self.dY_min
+		# self.trainY_op = self.dY_min
 
 		self.gF_min = opt.minimize(self.model.gF_loss, var_list=self.model.gF_vars, name='gF_op')
 		with tf.control_dependencies([self.gF_min]):
 			self.dX_min = opt.minimize(self.model.dX_loss, var_list=self.model.dX_vars, name='dX_op')
-			# self.dX_min = opt.minimize(-self.model.dX_loss, var_list=self.model.dX_vars, name='dX_op') # maxD = -minD
-		self.trainX_op = self.dX_min
-
-		self.train_op = [self.trainX_op, self.trainY_op]
-		# self.train_op = [self.gG_min, self.dY_min, self.gF_min, self.dX_min]
+		# self.trainX_op = self.dX_min
+		# self.train_op = [self.trainX_op, self.trainY_op]
+		self.train_op = [self.gG_min, self.dY_min, self.gF_min, self.dX_min]
 
 
 class ImagePairData(RNGDataFlow):
